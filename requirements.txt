@@ -1,0 +1,2 @@
+wechatbot-sdk==0.3.0
+twifork==2.3.5

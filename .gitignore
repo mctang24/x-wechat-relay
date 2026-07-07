@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+
+# Local runtime data
+data/
+logs/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Local project notes
+AGENTS.md
+ROADMAP.md
+docs/
