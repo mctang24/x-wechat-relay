@@ -22,17 +22,17 @@ class XSourceTest(unittest.TestCase):
     def test_default_tweet_count_is_three(self) -> None:
         self.assertEqual(DEFAULT_TWEET_COUNT, 3)
 
-    def test_x_request_timeout_is_longer_than_default_httpx_timeout(self) -> None:
-        self.assertEqual(X_REQUEST_TIMEOUT_SECONDS, 120.0)
+    def test_x_request_timeout_is_short_enough_for_cron_window(self) -> None:
+        self.assertEqual(X_REQUEST_TIMEOUT_SECONDS, 30.0)
 
     def test_configured_handles_uses_default_accounts(self) -> None:
         self.assertEqual(configured_handles({}), DEFAULT_HANDLES)
 
     def test_parse_handles_accepts_commas_at_prefix_and_deduplicates(self) -> None:
-        self.assertEqual(parse_handles("@OpenAI, AnthropicAI, OpenAI"), ("OpenAI", "AnthropicAI"))
+        self.assertEqual(parse_handles("@OpenAI, AnthropicAI, claudeai, OpenAI"), ("OpenAI", "AnthropicAI", "claudeai"))
 
     def test_configured_handles_reads_env_accounts(self) -> None:
-        self.assertEqual(configured_handles({X_HANDLES_ENV: "OpenAI, AnthropicAI"}), ("OpenAI", "AnthropicAI"))
+        self.assertEqual(configured_handles({X_HANDLES_ENV: "OpenAI, AnthropicAI, claudeai"}), ("OpenAI", "AnthropicAI", "claudeai"))
 
     def test_configured_handles_reads_local_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -45,10 +45,10 @@ class XSourceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "x_handles.txt"
 
-            saved_path = save_handles_file("@OpenAI, AnthropicAI, OpenAI", path)
+            saved_path = save_handles_file("@OpenAI, AnthropicAI, claudeai, OpenAI", path)
 
             self.assertEqual(saved_path, path)
-            self.assertEqual(path.read_text(encoding="utf-8"), "OpenAI\nAnthropicAI\n")
+            self.assertEqual(path.read_text(encoding="utf-8"), "OpenAI\nAnthropicAI\nclaudeai\n")
 
     def test_normalize_tweets_keeps_supported_fields(self) -> None:
         tweets = normalize_tweets(

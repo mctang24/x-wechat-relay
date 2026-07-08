@@ -14,10 +14,10 @@ from twikit import Client
 
 from .paths import X_COOKIES_PATH, X_HANDLES_PATH
 
-DEFAULT_HANDLES = ("OpenAI", "AnthropicAI")
+DEFAULT_HANDLES = ("OpenAI", "AnthropicAI", "claudeai")
 X_HANDLES_ENV = "X_MODEL_ALERT_HANDLES"
 DEFAULT_TWEET_COUNT = 3
-X_REQUEST_TIMEOUT_SECONDS = 120.0
+X_REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 def parse_handles(raw: str) -> tuple[str, ...]:
@@ -84,6 +84,14 @@ def ensure_cookies_file(path: Path = X_COOKIES_PATH) -> Path:
 def format_tweet_message(tweet: Tweet) -> str:
     text = " ".join(tweet.text.strip().split())
     return "\n".join((tweet.account, text, tweet.url))
+
+
+def format_digest_message(tweets: Iterable[Tweet]) -> str:
+    lines = ["X updates"]
+    for tweet in tweets:
+        text = " ".join(tweet.text.strip().split())
+        lines.extend(("", tweet.account, text, tweet.url))
+    return "\n".join(lines)
 
 
 def tweet_sort_key(tweet: Tweet) -> datetime:

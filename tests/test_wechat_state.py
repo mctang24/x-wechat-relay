@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from x_wechat_relay.wechat_bot import bot_identity_ids, format_warning, is_bot_self, refresh_binding_context, resolve_send_user_id
-from x_wechat_relay.scheduler import RANDOM_WINDOW_SECONDS, next_base_check, seconds_until_next_check
-from x_wechat_relay.monitor import run_check_once, send_to_binding
+from x_wechat_relay.wechat_bot import bot_identity_ids, format_warning, hydrate_saved_context, is_bot_self, refresh_binding_context, remember_context, resolve_send_user_id, wechat_error_fields
+from x_wechat_relay.scheduler import CRON_EXPRESSION, next_cron_time, seconds_until_next_check
+from x_wechat_relay.monitor import run_check_once, sleep_with_heartbeat
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from x_wechat_relay.wechat_state import load_binding, same_user, save_binding
@@ -30,15 +30,19 @@ class WechatStateTest(unittest.TestCase):
             save_binding(path, "user-1", "ctx-1")
             data = json.loads(path.read_text(encoding="utf-8"))
 
-            self.assertEqual(set(data), {"user_id", "context_token", "bound_at"})
+            self.assertEqual(set(data), {"user_id", "context_token", "bound_at", "context_updated_at"})
 
     def test_refresh_binding_context_updates_bound_user(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "binding.json"
             save_binding(path, "user-1", "old")
+            old_bound_at = load_binding(path).bound_at
 
             self.assertTrue(refresh_binding_context("user-1", "new", path))
-            self.assertEqual(load_binding(path).context_token, "new")
+            loaded = load_binding(path)
+            self.assertEqual(loaded.context_token, "new")
+            self.assertEqual(loaded.bound_at, old_bound_at)
+            self.assertGreaterEqual(loaded.context_updated_at, old_bound_at)
 
     def test_refresh_binding_context_ignores_other_user(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -47,6 +51,52 @@ class WechatStateTest(unittest.TestCase):
 
             self.assertFalse(refresh_binding_context("user-2", "new", path))
             self.assertEqual(load_binding(path).context_token, "old")
+
+    def test_hydrate_saved_context_restores_sdk_memory(self) -> None:
+        import x_wechat_relay.wechat_bot as wechat_bot
+
+        class Credentials:
+            account_id = "bot-1"
+
+        class Bot:
+            _credentials = Credentials()
+            _context_tokens = {}
+
+        old_status_path = wechat_bot.WECHAT_STATUS_PATH
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "binding.json"
+            status_path = Path(tmpdir) / "wechat_status.json"
+            save_binding(path, "user-1", "ctx-1")
+            wechat_bot.WECHAT_STATUS_PATH = status_path
+
+            try:
+                self.assertTrue(hydrate_saved_context(Bot(), path))
+                self.assertEqual(Bot._context_tokens, {"user-1": "ctx-1"})
+            finally:
+                wechat_bot.WECHAT_STATUS_PATH = old_status_path
+
+    def test_remember_context_updates_sdk_memory(self) -> None:
+        class Bot:
+            _context_tokens = {}
+
+        self.assertTrue(remember_context(Bot(), "user-1", "ctx-1"))
+        self.assertEqual(Bot._context_tokens, {"user-1": "ctx-1"})
+
+    def test_wechat_error_fields_include_api_diagnostics(self) -> None:
+        class ApiLikeError(Exception):
+            http_status = 200
+            errcode = -14
+            is_session_expired = True
+            payload = {"ret": 0, "errcode": -14, "errmsg": "expired", "token": "secret"}
+
+        fields = wechat_error_fields(ApiLikeError("failed"))
+
+        self.assertEqual(fields["error"], "ApiLikeError")
+        self.assertEqual(fields["http_status"], 200)
+        self.assertEqual(fields["errcode"], -14)
+        self.assertTrue(fields["session_expired"])
+        self.assertEqual(fields["payload_errmsg"], "expired")
+        self.assertNotIn("payload_token", fields)
 
 
 class WechatWarningTest(unittest.TestCase):
@@ -94,52 +144,27 @@ class WechatWarningTest(unittest.TestCase):
 
         self.assertEqual(resolve_send_user_id(Bot(), Msg()), "sender")
 
-    def test_scheduler_base_points_skip_weekends(self) -> None:
+    def test_scheduler_uses_cron_expression(self) -> None:
+        self.assertEqual(CRON_EXPRESSION, "0 9-17/2 * * *")
+
+    def test_scheduler_next_cron_time(self) -> None:
         eastern = ZoneInfo("America/New_York")
-        self.assertEqual(next_base_check(datetime(2026, 7, 6, 7, 59, tzinfo=eastern)).hour, 8)
-        self.assertEqual(next_base_check(datetime(2026, 7, 6, 8, 6, tzinfo=eastern)).hour, 10)
-        self.assertEqual(next_base_check(datetime(2026, 7, 11, 8, 10, tzinfo=eastern)).weekday(), 0)
+        self.assertEqual(next_cron_time(datetime(2026, 7, 8, 8, 59, tzinfo=eastern)).hour, 9)
+        self.assertEqual(next_cron_time(datetime(2026, 7, 8, 9, 1, tzinfo=eastern)).hour, 11)
+        self.assertEqual(next_cron_time(datetime(2026, 7, 8, 11, 30, tzinfo=eastern)).hour, 13)
+        self.assertEqual(next_cron_time(datetime(2026, 7, 8, 15, 1, tzinfo=eastern)).hour, 17)
+        self.assertEqual(next_cron_time(datetime(2026, 7, 8, 17, 1, tzinfo=eastern)).day, 9)
 
-    def test_scheduler_waits_until_next_weekday_base_point(self) -> None:
+    def test_scheduler_seconds_until_next_check(self) -> None:
         eastern = ZoneInfo("America/New_York")
-        self.assertEqual(seconds_until_next_check(datetime(2026, 7, 6, 7, 59, tzinfo=eastern)), 60)
-        self.assertEqual(seconds_until_next_check(datetime(2026, 7, 6, 8, 6, tzinfo=eastern)), 6840)
-        self.assertEqual(seconds_until_next_check(datetime(2026, 7, 10, 18, 16, tzinfo=eastern)), 222240)
+        self.assertEqual(seconds_until_next_check(datetime(2026, 7, 8, 8, 59, tzinfo=eastern)), 60)
+        self.assertEqual(seconds_until_next_check(datetime(2026, 7, 8, 9, 1, tzinfo=eastern)), 7140)
+        self.assertEqual(seconds_until_next_check(datetime(2026, 7, 8, 11, 59, tzinfo=eastern)), 3660)
 
-    def test_scheduler_jitter_window_size(self) -> None:
-        self.assertEqual(RANDOM_WINDOW_SECONDS, 900)
-
-    def test_monitor_send_helper_exists(self) -> None:
-        self.assertIsNotNone(send_to_binding)
-
-
-    def test_monitor_send_helper_returns_false_for_self_binding(self) -> None:
-        import x_wechat_relay.monitor as monitor
-
-        class Credentials:
-            account_id = "bot-1"
-            user_id = "login-user"
-
-        class Bot:
-            _credentials = Credentials()
-
-            async def send(self, _user_id, _text):
-                raise AssertionError("must not send to bot self")
-
-        old_path = monitor.WECHAT_BINDING_PATH
-        with tempfile.TemporaryDirectory() as tmpdir:
-            binding_path = Path(tmpdir) / "binding.json"
-            save_binding(binding_path, "bot-1", "ctx")
-            monitor.WECHAT_BINDING_PATH = binding_path
-            try:
-                sent = __import__("asyncio").run(send_to_binding(Bot(), "text"))
-            finally:
-                monitor.WECHAT_BINDING_PATH = old_path
-
-        self.assertFalse(sent)
 
     def test_monitor_advances_state_when_wechat_send_fails(self) -> None:
         import x_wechat_relay.monitor as monitor
+        import x_wechat_relay.wechat_bot as wechat_bot
 
         async def fake_fetch_latest_tweets():
             from x_wechat_relay.x_source import Tweet
@@ -158,14 +183,18 @@ class WechatWarningTest(unittest.TestCase):
         old_save = monitor.save_last_ids
         old_sleep = monitor.asyncio.sleep
         old_path = monitor.WECHAT_BINDING_PATH
+        old_status_path = wechat_bot.WECHAT_STATUS_PATH
         with tempfile.TemporaryDirectory() as tmpdir:
             binding_path = Path(tmpdir) / "binding.json"
+            status_path = Path(tmpdir) / "wechat_status.json"
             save_binding(binding_path, "user-1", "ctx-1")
             monitor.fetch_latest_tweets = fake_fetch_latest_tweets
             monitor.load_last_ids = lambda: {"OpenAI": "1"}
             monitor.save_last_ids = lambda value: saved.append(value)
             monitor.asyncio.sleep = fake_sleep
             monitor.WECHAT_BINDING_PATH = binding_path
+            wechat_bot.WECHAT_BINDING_PATH = binding_path
+            wechat_bot.WECHAT_STATUS_PATH = status_path
             try:
                 sent_count = __import__("asyncio").run(run_check_once(Bot()))
             finally:
@@ -174,9 +203,68 @@ class WechatWarningTest(unittest.TestCase):
                 monitor.save_last_ids = old_save
                 monitor.asyncio.sleep = old_sleep
                 monitor.WECHAT_BINDING_PATH = old_path
+                wechat_bot.WECHAT_BINDING_PATH = old_path
+                wechat_bot.WECHAT_STATUS_PATH = old_status_path
 
         self.assertEqual(sent_count, 0)
         self.assertEqual(saved, [{"OpenAI": "2"}])
+
+    def test_monitor_sends_all_candidates_in_one_digest(self) -> None:
+        import x_wechat_relay.monitor as monitor
+        import x_wechat_relay.wechat_bot as wechat_bot
+        from x_wechat_relay.x_source import Tweet
+
+        async def fake_fetch_latest_tweets():
+            return [
+                Tweet("OpenAI", "3", "newest", "https://x.com/OpenAI/status/3", "Tue Jun 30 17:12:23 +0000 2026"),
+                Tweet("OpenAI", "2", "middle", "https://x.com/OpenAI/status/2", "Tue Jun 30 17:11:23 +0000 2026"),
+            ]
+
+        class Bot:
+            sent_text = ""
+
+            async def send(self, _user_id, text):
+                self.sent_text = text
+
+        old_fetch = monitor.fetch_latest_tweets
+        old_load = monitor.load_last_ids
+        old_save = monitor.save_last_ids
+        old_path = monitor.WECHAT_BINDING_PATH
+        old_status_path = wechat_bot.WECHAT_STATUS_PATH
+        with tempfile.TemporaryDirectory() as tmpdir:
+            binding_path = Path(tmpdir) / "binding.json"
+            status_path = Path(tmpdir) / "wechat_status.json"
+            save_binding(binding_path, "user-1", "ctx-1")
+            bot = Bot()
+            monitor.fetch_latest_tweets = fake_fetch_latest_tweets
+            monitor.load_last_ids = lambda: {"OpenAI": "1"}
+            monitor.save_last_ids = lambda _value: None
+            monitor.WECHAT_BINDING_PATH = binding_path
+            wechat_bot.WECHAT_BINDING_PATH = binding_path
+            wechat_bot.WECHAT_STATUS_PATH = status_path
+            try:
+                sent_count = __import__("asyncio").run(run_check_once(bot))
+            finally:
+                monitor.fetch_latest_tweets = old_fetch
+                monitor.load_last_ids = old_load
+                monitor.save_last_ids = old_save
+                monitor.WECHAT_BINDING_PATH = old_path
+                wechat_bot.WECHAT_BINDING_PATH = old_path
+                wechat_bot.WECHAT_STATUS_PATH = old_status_path
+
+        self.assertEqual(sent_count, 2)
+        self.assertIn("https://x.com/OpenAI/status/3", bot.sent_text)
+        self.assertIn("https://x.com/OpenAI/status/2", bot.sent_text)
+
+    def test_sleep_with_heartbeat_completes_in_steps(self) -> None:
+        calls = []
+
+        async def fake_sleep(_seconds):
+            calls.append(_seconds)
+
+        __import__("asyncio").run(sleep_with_heartbeat(61, event="waiting_cron", sleep=fake_sleep))
+
+        self.assertEqual(calls, [60, 1])
 
 
 if __name__ == "__main__":

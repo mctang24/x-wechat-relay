@@ -11,7 +11,7 @@
 ## 使用
 
 ```bash
-make init ACCOUNTS="OpenAI,AnthropicAI"
+make init ACCOUNTS="OpenAI,AnthropicAI,claudeai"
 make wechat
 ```
 

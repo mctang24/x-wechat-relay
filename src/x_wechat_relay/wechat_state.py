@@ -11,6 +11,7 @@ class WechatBinding:
     user_id: str
     context_token: str
     bound_at: str
+    context_updated_at: str
 
 
 def now_iso() -> str:
@@ -21,12 +22,30 @@ def load_binding(path: Path) -> WechatBinding | None:
     if not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    return WechatBinding(user_id=data["user_id"], context_token=data.get("context_token", ""), bound_at=data["bound_at"])
+    return WechatBinding(
+        user_id=data["user_id"],
+        context_token=data.get("context_token", ""),
+        bound_at=data["bound_at"],
+        context_updated_at=data.get("context_updated_at", data["bound_at"]),
+    )
 
 
-def save_binding(path: Path, user_id: str, context_token: str = "") -> WechatBinding:
+def save_binding(
+    path: Path,
+    user_id: str,
+    context_token: str = "",
+    *,
+    bound_at: str | None = None,
+    context_updated_at: str | None = None,
+) -> WechatBinding:
     path.parent.mkdir(parents=True, exist_ok=True)
-    binding = WechatBinding(user_id=user_id, context_token=context_token, bound_at=now_iso())
+    now = now_iso()
+    binding = WechatBinding(
+        user_id=user_id,
+        context_token=context_token,
+        bound_at=bound_at or now,
+        context_updated_at=context_updated_at or now,
+    )
     path.write_text(json.dumps(asdict(binding), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return binding
 

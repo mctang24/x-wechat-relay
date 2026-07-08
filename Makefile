@@ -4,13 +4,16 @@ PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 NO_PROXY_ENV := env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u all_proxy -u https_proxy -u http_proxy
 ENV := PYTHONPATH=src
-ACCOUNTS ?= OpenAI,AnthropicAI
+ACCOUNTS ?= OpenAI,AnthropicAI,claudeai
 
 .PHONY: init setup wechat status test check x-cookies-init x-live-check
 
 setup:
 	$(PYTHON) -m venv $(VENV)
 	$(NO_PROXY_ENV) $(PIP) install -r requirements.txt
+
+init: setup
+	$(ENV) $(PY) -m x_wechat_relay.x_source --set-handles "$(ACCOUNTS)" --init-cookies
 
 wechat:
 	$(NO_PROXY_ENV) $(ENV) $(PY) -m x_wechat_relay.wechat_bot run
