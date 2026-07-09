@@ -11,7 +11,7 @@ Forward updates from selected X accounts to your personal WeChat.
 ## Usage
 
 ```bash
-make init ACCOUNTS="OpenAI,AnthropicAI"
+make init ACCOUNTS="OpenAI,AnthropicAI,claudeai"
 make wechat
 ```
 
