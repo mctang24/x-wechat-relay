@@ -6,7 +6,6 @@ import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
-from collections.abc import Awaitable, Callable
 
 from wechatbot import WeChatBot
 
@@ -18,9 +17,7 @@ from .wechat_state import load_binding
 from .x_source import fetch_latest_tweets, format_digest_message
 from .x_state import load_last_ids, plan_new_tweets, save_last_ids
 
-Sleep = Callable[[float], Awaitable[None]]
 X_CHECK_TIMEOUT_SECONDS = 120.0
-
 
 
 def write_monitor_status(event: str, **fields: object) -> None:
@@ -129,64 +126,3 @@ def start_monitor_thread(bot: WeChatBot, loop: asyncio.AbstractEventLoop) -> tup
     thread = threading.Thread(target=monitor_thread_loop, args=(bot, loop, stop_event), name="x-wechat-relay-monitor", daemon=True)
     thread.start()
     return thread, stop_event
-
-
-async def run_check_once(bot: WeChatBot) -> int:
-    started = time.monotonic()
-    tweets = await asyncio.wait_for(fetch_latest_tweets(), timeout=X_CHECK_TIMEOUT_SECONDS)
-    last_ids = load_last_ids()
-    first_run = not last_ids
-    candidates, next_last_ids = plan_new_tweets(tweets, last_ids)
-
-    if first_run:
-        save_last_ids(next_last_ids)
-        print("X 首次运行已建立基线，不推送历史内容。", flush=True)
-        return 0
-
-    sent_count = 0
-    if candidates:
-        try:
-            if await send_text_to_binding(bot, format_digest_message(candidates)):
-                sent_count = len(candidates)
-        except Exception as exc:
-            error_log(f"微信推送失败，本轮摘要未送达: {type(exc).__name__}")
-
-    save_last_ids(next_last_ids)
-    if candidates and sent_count == 0:
-        error_log(f"微信推送失败，但本轮已按 cron 规则推进 X 状态: 0/{len(candidates)}")
-    print(f"X 检查完成，发现 {len(candidates)} 条，摘要推送 {sent_count} 条。", flush=True)
-    write_monitor_status("checked", sent_count=sent_count, candidate_count=len(candidates), elapsed_seconds=round(time.monotonic() - started, 1))
-    return sent_count
-
-
-async def sleep_with_heartbeat(total_seconds: int, *, event: str, sleep: Sleep, **fields: object) -> None:
-    remaining = max(0, total_seconds)
-    while remaining > 0:
-        step = min(60, remaining)
-        write_monitor_status(event, remaining_seconds=remaining, **fields)
-        await sleep(step)
-        remaining -= step
-
-
-async def monitor_loop(bot: WeChatBot, sleep: Sleep = asyncio.sleep) -> None:
-    write_monitor_status("started")
-    target_time = next_cron_time(schedule_now())
-    while True:
-        scheduled_at = target_time.isoformat()
-        delay = max(0, int((target_time - schedule_now()).total_seconds()))
-        write_monitor_status("waiting_cron", scheduled_at=scheduled_at, remaining_seconds=delay)
-        if delay:
-            await sleep_with_heartbeat(delay, event="waiting_cron", sleep=sleep, scheduled_at=scheduled_at)
-
-        target_time = next_cron_time(target_time)
-        try:
-            write_monitor_status("checking", scheduled_at=scheduled_at)
-            sent_count = await run_check_once(bot)
-            write_monitor_status("checked", sent_count=sent_count, scheduled_at=scheduled_at)
-        except Exception as exc:
-            write_monitor_status("check_failed", error=type(exc).__name__, scheduled_at=scheduled_at)
-            error_log(f"X 检查失败: {type(exc).__name__}")
-            try:
-                await send_text_to_binding(bot, format_warning(f"X check failed: {type(exc).__name__}"))
-            except Exception as send_exc:
-                error_log(f"微信告警发送失败: {type(send_exc).__name__}")

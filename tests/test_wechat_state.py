@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
+import threading
 import unittest
-from pathlib import Path
-
-from x_wechat_relay.wechat_bot import bot_identity_ids, format_warning, hydrate_saved_context, is_bot_self, refresh_binding_context, remember_context, resolve_send_user_id, wechat_error_fields
-from x_wechat_relay.scheduler import CRON_EXPRESSION, next_cron_time, seconds_until_next_check
-from x_wechat_relay.monitor import run_check_once, sleep_with_heartbeat
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from x_wechat_relay.monitor import run_check_once_from_thread
+from x_wechat_relay.scheduler import CRON_EXPRESSION, next_cron_time, seconds_until_next_check
+from x_wechat_relay.wechat_bot import bot_identity_ids, format_warning, hydrate_saved_context, is_bot_self, refresh_binding_context, remember_context, resolve_send_user_id, wechat_error_fields
 from x_wechat_relay.wechat_state import load_binding, same_user, save_binding
 
 
@@ -170,18 +172,18 @@ class WechatWarningTest(unittest.TestCase):
             from x_wechat_relay.x_source import Tweet
             return [Tweet("OpenAI", "2", "new", "https://x.com/OpenAI/status/2", "Tue Jun 30 17:12:23 +0000 2026")]
 
-        async def fake_sleep(_seconds):
-            return None
-
         class Bot:
             async def send(self, _user_id, _text):
                 raise RuntimeError("send failed")
 
+        loop = asyncio.new_event_loop()
+        loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+        loop_thread.start()
         saved = []
         old_fetch = monitor.fetch_latest_tweets
         old_load = monitor.load_last_ids
         old_save = monitor.save_last_ids
-        old_sleep = monitor.asyncio.sleep
+        old_write_status = monitor.write_monitor_status
         old_path = monitor.WECHAT_BINDING_PATH
         old_status_path = wechat_bot.WECHAT_STATUS_PATH
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -191,17 +193,20 @@ class WechatWarningTest(unittest.TestCase):
             monitor.fetch_latest_tweets = fake_fetch_latest_tweets
             monitor.load_last_ids = lambda: {"OpenAI": "1"}
             monitor.save_last_ids = lambda value: saved.append(value)
-            monitor.asyncio.sleep = fake_sleep
+            monitor.write_monitor_status = lambda *_args, **_kwargs: None
             monitor.WECHAT_BINDING_PATH = binding_path
             wechat_bot.WECHAT_BINDING_PATH = binding_path
             wechat_bot.WECHAT_STATUS_PATH = status_path
             try:
-                sent_count = __import__("asyncio").run(run_check_once(Bot()))
+                sent_count = run_check_once_from_thread(Bot(), loop)
             finally:
+                loop.call_soon_threadsafe(loop.stop)
+                loop_thread.join(timeout=1)
+                loop.close()
                 monitor.fetch_latest_tweets = old_fetch
                 monitor.load_last_ids = old_load
                 monitor.save_last_ids = old_save
-                monitor.asyncio.sleep = old_sleep
+                monitor.write_monitor_status = old_write_status
                 monitor.WECHAT_BINDING_PATH = old_path
                 wechat_bot.WECHAT_BINDING_PATH = old_path
                 wechat_bot.WECHAT_STATUS_PATH = old_status_path
@@ -226,9 +231,13 @@ class WechatWarningTest(unittest.TestCase):
             async def send(self, _user_id, text):
                 self.sent_text = text
 
+        loop = asyncio.new_event_loop()
+        loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+        loop_thread.start()
         old_fetch = monitor.fetch_latest_tweets
         old_load = monitor.load_last_ids
         old_save = monitor.save_last_ids
+        old_write_status = monitor.write_monitor_status
         old_path = monitor.WECHAT_BINDING_PATH
         old_status_path = wechat_bot.WECHAT_STATUS_PATH
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -239,15 +248,20 @@ class WechatWarningTest(unittest.TestCase):
             monitor.fetch_latest_tweets = fake_fetch_latest_tweets
             monitor.load_last_ids = lambda: {"OpenAI": "1"}
             monitor.save_last_ids = lambda _value: None
+            monitor.write_monitor_status = lambda *_args, **_kwargs: None
             monitor.WECHAT_BINDING_PATH = binding_path
             wechat_bot.WECHAT_BINDING_PATH = binding_path
             wechat_bot.WECHAT_STATUS_PATH = status_path
             try:
-                sent_count = __import__("asyncio").run(run_check_once(bot))
+                sent_count = run_check_once_from_thread(bot, loop)
             finally:
+                loop.call_soon_threadsafe(loop.stop)
+                loop_thread.join(timeout=1)
+                loop.close()
                 monitor.fetch_latest_tweets = old_fetch
                 monitor.load_last_ids = old_load
                 monitor.save_last_ids = old_save
+                monitor.write_monitor_status = old_write_status
                 monitor.WECHAT_BINDING_PATH = old_path
                 wechat_bot.WECHAT_BINDING_PATH = old_path
                 wechat_bot.WECHAT_STATUS_PATH = old_status_path
@@ -255,16 +269,6 @@ class WechatWarningTest(unittest.TestCase):
         self.assertEqual(sent_count, 2)
         self.assertIn("https://x.com/OpenAI/status/3", bot.sent_text)
         self.assertIn("https://x.com/OpenAI/status/2", bot.sent_text)
-
-    def test_sleep_with_heartbeat_completes_in_steps(self) -> None:
-        calls = []
-
-        async def fake_sleep(_seconds):
-            calls.append(_seconds)
-
-        __import__("asyncio").run(sleep_with_heartbeat(61, event="waiting_cron", sleep=fake_sleep))
-
-        self.assertEqual(calls, [60, 1])
 
 
 if __name__ == "__main__":

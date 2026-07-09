@@ -21,14 +21,11 @@ wechat:
 status:
 	$(NO_PROXY_ENV) $(ENV) $(PY) -m x_wechat_relay.wechat_bot status
 
-
-
 x-cookies-init:
 	$(ENV) $(PY) -m x_wechat_relay.x_source --init-cookies
 
 x-live-check:
 	$(NO_PROXY_ENV) $(ENV) $(PY) -m x_wechat_relay.x_source
-
 
 test:
 	$(ENV) $(PY) -m unittest discover -s tests
