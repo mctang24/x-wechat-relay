@@ -9,13 +9,27 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from x_wechat_relay.monitor import run_check_once_from_thread
+from x_wechat_relay.monitor import format_exception, run_check_once_from_thread
 from x_wechat_relay.scheduler import CRON_EXPRESSION, next_cron_time, seconds_until_next_check
 from x_wechat_relay.wechat_bot import bot_identity_ids, format_warning, hydrate_saved_context, is_bot_self, refresh_binding_context, remember_context, resolve_send_user_id, wechat_error_fields
 from x_wechat_relay.wechat_state import load_binding, same_user, save_binding
 
 
 class WechatStateTest(unittest.TestCase):
+    def test_format_exception_includes_cause_chain(self) -> None:
+        try:
+            try:
+                raise OSError("connection refused")
+            except OSError as cause:
+                raise ConnectionError("request failed") from cause
+        except ConnectionError as exc:
+            message = format_exception(exc)
+
+        self.assertEqual(message, "ConnectionError: request failed <- OSError: connection refused")
+
+    def test_format_exception_collapses_multiline_message(self) -> None:
+        self.assertEqual(format_exception(RuntimeError("first\n  second")), "RuntimeError: first second")
+
     def test_save_and_load_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "binding.json"

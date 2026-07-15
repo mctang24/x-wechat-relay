@@ -20,6 +20,21 @@ from .x_state import load_last_ids, plan_new_tweets, save_last_ids
 X_CHECK_TIMEOUT_SECONDS = 120.0
 
 
+def format_exception(exc: BaseException) -> str:
+    parts = []
+    current: BaseException | None = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = " ".join(str(current).split())
+        part = type(current).__name__
+        if message:
+            part += f": {message}"
+        parts.append(part)
+        current = current.__cause__ or current.__context__
+    return " <- ".join(parts)
+
+
 def write_monitor_status(event: str, **fields: object) -> None:
     MONITOR_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -113,10 +128,11 @@ def monitor_thread_loop(bot: WeChatBot, loop: asyncio.AbstractEventLoop, stop_ev
             sent_count = run_check_once_from_thread(bot, loop)
             write_monitor_status("checked", sent_count=sent_count, scheduled_at=scheduled_at, elapsed_seconds=round(time.monotonic() - started, 1))
         except Exception as exc:
-            write_monitor_status("check_failed", error=type(exc).__name__, scheduled_at=scheduled_at)
-            error_log(f"X 检查失败: {type(exc).__name__}")
+            error = format_exception(exc)
+            write_monitor_status("check_failed", error=error, scheduled_at=scheduled_at)
+            error_log(f"X 检查失败: {error}")
             try:
-                send_to_binding_from_thread(bot, loop, format_warning(f"X check failed: {type(exc).__name__}"))
+                send_to_binding_from_thread(bot, loop, format_warning(f"X check failed: {error}"))
             except Exception as send_exc:
                 error_log(f"微信告警发送失败: {type(send_exc).__name__}")
 

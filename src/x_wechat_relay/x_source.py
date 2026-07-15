@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import socket
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -18,6 +19,32 @@ DEFAULT_HANDLES = ("OpenAI", "AnthropicAI", "claudeai")
 X_HANDLES_ENV = "X_MODEL_ALERT_HANDLES"
 DEFAULT_TWEET_COUNT = 3
 X_REQUEST_TIMEOUT_SECONDS = 30.0
+X_STATIC_ASSET_HOST = "abs.twimg.com"
+X_STATIC_ASSET_FALLBACK_IPS = ("104.18.39.59", "172.64.148.197")
+_X_DNS_FALLBACK_INSTALLED = False
+
+
+def x_fallback_getaddrinfo(original, host, port, family=0, type=0, proto=0, flags=0):
+    normalized_host = host.decode("ascii") if isinstance(host, bytes) else host
+    if normalized_host != X_STATIC_ASSET_HOST:
+        return original(host, port, family, type, proto, flags)
+    results = []
+    for ip in X_STATIC_ASSET_FALLBACK_IPS:
+        results.extend(original(ip, port, family, type, proto, flags))
+    return results
+
+
+def install_x_dns_fallback() -> None:
+    global _X_DNS_FALLBACK_INSTALLED
+    if _X_DNS_FALLBACK_INSTALLED:
+        return
+    original = socket.getaddrinfo
+
+    def fallback_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return x_fallback_getaddrinfo(original, host, port, family, type, proto, flags)
+
+    socket.getaddrinfo = fallback_getaddrinfo
+    _X_DNS_FALLBACK_INSTALLED = True
 
 
 def parse_handles(raw: str) -> tuple[str, ...]:
@@ -133,6 +160,7 @@ async def fetch_latest_tweets(
     cookies_path: Path = X_COOKIES_PATH,
     count: int = DEFAULT_TWEET_COUNT,
 ) -> list[Tweet]:
+    install_x_dns_fallback()
     handles = configured_handles() if handles is None else tuple(handles)
     cookies_path = ensure_cookies_file(cookies_path)
     client = Client("en-US", timeout=X_REQUEST_TIMEOUT_SECONDS)

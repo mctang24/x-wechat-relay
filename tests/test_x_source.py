@@ -6,7 +6,7 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
-from x_wechat_relay.x_source import DEFAULT_HANDLES, DEFAULT_TWEET_COUNT, X_HANDLES_ENV, X_REQUEST_TIMEOUT_SECONDS, Tweet, configured_handles, format_tweet_message, normalize_tweets, parse_handles, save_handles_file, summarize_tweets, tweet_sort_key
+from x_wechat_relay.x_source import DEFAULT_HANDLES, DEFAULT_TWEET_COUNT, X_HANDLES_ENV, X_REQUEST_TIMEOUT_SECONDS, X_STATIC_ASSET_FALLBACK_IPS, Tweet, configured_handles, format_tweet_message, normalize_tweets, parse_handles, save_handles_file, summarize_tweets, tweet_sort_key, x_fallback_getaddrinfo
 from x_wechat_relay.x_state import plan_new_tweets
 
 
@@ -19,6 +19,39 @@ class FakeTwikitTweet:
 
 
 class XSourceTest(unittest.TestCase):
+    def test_x_dns_fallback_replaces_poisoned_static_asset_resolution(self) -> None:
+        calls = []
+
+        def original(host, port, family, type, proto, flags):
+            calls.append(host)
+            return [(family, type, proto, "", (host, port))]
+
+        results = x_fallback_getaddrinfo(original, "abs.twimg.com", 443)
+
+        self.assertEqual(calls, list(X_STATIC_ASSET_FALLBACK_IPS))
+        self.assertEqual([result[4][0] for result in results], list(X_STATIC_ASSET_FALLBACK_IPS))
+
+    def test_x_dns_fallback_accepts_byte_hostname_from_httpcore(self) -> None:
+        calls = []
+
+        def original(host, port, family, type, proto, flags):
+            calls.append(host)
+            return []
+
+        x_fallback_getaddrinfo(original, b"abs.twimg.com", 443)
+
+        self.assertEqual(calls, list(X_STATIC_ASSET_FALLBACK_IPS))
+
+    def test_x_dns_fallback_leaves_other_hosts_unchanged(self) -> None:
+        calls = []
+
+        def original(host, port, family, type, proto, flags):
+            calls.append(host)
+            return []
+
+        self.assertEqual(x_fallback_getaddrinfo(original, "x.com", 443), [])
+        self.assertEqual(calls, ["x.com"])
+
     def test_default_tweet_count_is_three(self) -> None:
         self.assertEqual(DEFAULT_TWEET_COUNT, 3)
 
