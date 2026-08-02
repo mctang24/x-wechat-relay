@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import socket
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -22,15 +23,37 @@ X_REQUEST_TIMEOUT_SECONDS = 30.0
 X_STATIC_ASSET_HOST = "abs.twimg.com"
 X_STATIC_ASSET_FALLBACK_IPS = ("104.18.39.59", "172.64.148.197")
 _X_DNS_FALLBACK_INSTALLED = False
+_X_DNS_RESULTS: dict[str, tuple[str, tuple[str, ...]]] = {}
+_X_DNS_RESULTS_LOCK = threading.Lock()
+
+
+def _resolved_ips(results: list[tuple]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(str(result[4][0]) for result in results if result[4]))
+
+
+def _remember_dns_result(host: str, route: str, results: list[tuple]) -> None:
+    with _X_DNS_RESULTS_LOCK:
+        _X_DNS_RESULTS[host] = (route, _resolved_ips(results))
+
+
+def format_x_connection_diagnostic(stage: str, host: str) -> str:
+    with _X_DNS_RESULTS_LOCK:
+        route, ips = _X_DNS_RESULTS.get(host, ("unknown", ()))
+    resolved_ips = ",".join(ips) if ips else "unknown"
+    return f"stage={stage} host={host or 'unknown'} dns_route={route} resolved_ips={resolved_ips}"
 
 
 def x_fallback_getaddrinfo(original, host, port, family=0, type=0, proto=0, flags=0):
     normalized_host = host.decode("ascii") if isinstance(host, bytes) else host
     if normalized_host != X_STATIC_ASSET_HOST:
-        return original(host, port, family, type, proto, flags)
+        results = original(host, port, family, type, proto, flags)
+        if normalized_host:
+            _remember_dns_result(normalized_host, "system", results)
+        return results
     results = []
     for ip in X_STATIC_ASSET_FALLBACK_IPS:
         results.extend(original(ip, port, family, type, proto, flags))
+    _remember_dns_result(normalized_host, "fallback", results)
     return results
 
 
@@ -165,13 +188,29 @@ async def fetch_latest_tweets(
     cookies_path = ensure_cookies_file(cookies_path)
     client = Client("en-US", timeout=X_REQUEST_TIMEOUT_SECONDS)
     client.load_cookies(str(cookies_path))
+    request_stage = "client_initialization"
+    request_host = "unknown"
+
+    async def record_request(request) -> None:
+        nonlocal request_host, request_stage
+        request_host = request.url.host or "unknown"
+        if request_host == X_STATIC_ASSET_HOST or request.url.path in ("", "/"):
+            request_stage = "client_initialization"
+
+    client.http.event_hooks["request"].append(record_request)
 
     tweets: list[Tweet] = []
-    for handle in handles:
-        account = handle.lstrip("@")
-        user = await client.get_user_by_screen_name(account)
-        result = await user.get_tweets("Tweets", count=count)
-        tweets.extend(normalize_tweets(account, list(result)[:count]))
+    try:
+        for handle in handles:
+            account = handle.lstrip("@")
+            request_stage = "lookup_user"
+            user = await client.get_user_by_screen_name(account)
+            request_stage = "read_timeline"
+            result = await user.get_tweets("Tweets", count=count)
+            tweets.extend(normalize_tweets(account, list(result)[:count]))
+    except Exception as exc:
+        diagnostic = format_x_connection_diagnostic(request_stage, request_host)
+        raise RuntimeError(diagnostic) from exc
     return tweets
 
 

@@ -6,7 +6,7 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
-from x_wechat_relay.x_source import DEFAULT_HANDLES, DEFAULT_TWEET_COUNT, X_HANDLES_ENV, X_REQUEST_TIMEOUT_SECONDS, X_STATIC_ASSET_FALLBACK_IPS, Tweet, configured_handles, format_tweet_message, normalize_tweets, parse_handles, save_handles_file, summarize_tweets, tweet_sort_key, x_fallback_getaddrinfo
+from x_wechat_relay.x_source import DEFAULT_HANDLES, DEFAULT_TWEET_COUNT, X_HANDLES_ENV, X_REQUEST_TIMEOUT_SECONDS, X_STATIC_ASSET_FALLBACK_IPS, Tweet, configured_handles, format_tweet_message, format_x_connection_diagnostic, normalize_tweets, parse_handles, save_handles_file, summarize_tweets, tweet_sort_key, x_fallback_getaddrinfo
 from x_wechat_relay.x_state import plan_new_tweets
 
 
@@ -41,6 +41,17 @@ class XSourceTest(unittest.TestCase):
         x_fallback_getaddrinfo(original, b"abs.twimg.com", 443)
 
         self.assertEqual(calls, list(X_STATIC_ASSET_FALLBACK_IPS))
+
+    def test_x_dns_fallback_records_safe_connection_diagnostic(self) -> None:
+        def original(host, port, family, type, proto, flags):
+            return [(family, type, proto, "", (host, port))]
+
+        x_fallback_getaddrinfo(original, "abs.twimg.com", 443)
+
+        self.assertEqual(
+            format_x_connection_diagnostic("client_initialization", "abs.twimg.com"),
+            "stage=client_initialization host=abs.twimg.com dns_route=fallback resolved_ips=104.18.39.59,172.64.148.197",
+        )
 
     def test_x_dns_fallback_leaves_other_hosts_unchanged(self) -> None:
         calls = []

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -18,6 +19,9 @@ from .x_source import fetch_latest_tweets, format_digest_message
 from .x_state import load_last_ids, plan_new_tweets, save_last_ids
 
 X_CHECK_TIMEOUT_SECONDS = 120.0
+X_RETRY_DELAY_MIN_SECONDS = 20.0
+X_RETRY_DELAY_MAX_SECONDS = 60.0
+X_RETRYABLE_CONNECTION_ERRORS = {"ConnectError", "ConnectTimeout", "SSLEOFError"}
 
 
 def format_exception(exc: BaseException) -> str:
@@ -33,6 +37,19 @@ def format_exception(exc: BaseException) -> str:
         parts.append(part)
         current = current.__cause__ or current.__context__
     return " <- ".join(parts)
+
+
+def is_retryable_x_initialization_error(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen = set()
+    initialization_failure = False
+    retryable_connection_failure = False
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        initialization_failure = initialization_failure or "stage=client_initialization" in str(current)
+        retryable_connection_failure = retryable_connection_failure or type(current).__name__ in X_RETRYABLE_CONNECTION_ERRORS
+        current = current.__cause__ or current.__context__
+    return initialization_failure and retryable_connection_failure
 
 
 def write_monitor_status(event: str, **fields: object) -> None:
@@ -77,8 +94,39 @@ def send_to_binding_from_thread(bot: WeChatBot, loop: asyncio.AbstractEventLoop,
     return bool(future.result(timeout=60))
 
 
+async def fetch_latest_tweets_with_retry(*, retry_delay_seconds: float | None = None) -> list:
+    deadline = asyncio.get_running_loop().time() + X_CHECK_TIMEOUT_SECONDS
+
+    async def fetch_with_remaining_time() -> list:
+        remaining_seconds = deadline - asyncio.get_running_loop().time()
+        if remaining_seconds <= 0:
+            raise TimeoutError("X check total timeout exceeded")
+        return await asyncio.wait_for(fetch_latest_tweets(), timeout=remaining_seconds)
+
+    try:
+        return await fetch_with_remaining_time()
+    except Exception as exc:
+        if not is_retryable_x_initialization_error(exc):
+            raise
+        delay_seconds = random.uniform(X_RETRY_DELAY_MIN_SECONDS, X_RETRY_DELAY_MAX_SECONDS) if retry_delay_seconds is None else retry_delay_seconds
+        if delay_seconds >= deadline - asyncio.get_running_loop().time():
+            raise
+        write_monitor_status(
+            "x_retry_waiting",
+            attempt=2,
+            delay_seconds=round(delay_seconds, 1),
+            error=format_exception(exc),
+        )
+        await asyncio.sleep(delay_seconds)
+
+    write_monitor_status("fetching_x", attempt=2)
+    tweets = await fetch_with_remaining_time()
+    write_monitor_status("x_retry_succeeded", attempt=2)
+    return tweets
+
+
 def fetch_latest_tweets_with_timeout() -> list:
-    return asyncio.run(asyncio.wait_for(fetch_latest_tweets(), timeout=X_CHECK_TIMEOUT_SECONDS))
+    return asyncio.run(fetch_latest_tweets_with_retry())
 
 
 def run_check_once_from_thread(bot: WeChatBot, loop: asyncio.AbstractEventLoop) -> int:
